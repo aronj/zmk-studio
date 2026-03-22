@@ -48,34 +48,42 @@ export function keymapSyncPlugin(options: KeymapSyncPluginOptions = {}): Plugin 
         return;
       }
 
-      // Attach WebSocket server to Vite's HTTP server
+      // Use noServer mode to avoid intercepting Vite's HMR WebSocket.
+      // ws v8 calls abortHandshake() on non-matching paths, which kills
+      // Vite's HMR connection and causes infinite full-page reloads.
+      wss = new WebSocketServer({ noServer: true });
+
+      wss.on("connection", (ws: WebSocket) => {
+        console.log("[keymap-sync] Client connected");
+
+        ws.on("message", (data: Buffer | string) => {
+          try {
+            const msg: SyncMessage = JSON.parse(data.toString());
+            handleMessage(ws, msg);
+          } catch (err: any) {
+            sendStatus(ws, false, `Invalid message: ${err.message}`);
+          }
+        });
+
+        ws.on("close", () => {
+          console.log("[keymap-sync] Client disconnected");
+          manager?.flush();
+        });
+      });
+
+      // Manually handle upgrade requests — only take ours, leave Vite's alone
+      server.httpServer?.on("upgrade", (req, socket, head) => {
+        const pathname = req.url?.split("?")[0];
+        if (pathname === "/ws/keymap-sync" && wss) {
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss!.emit("connection", ws, req);
+          });
+        }
+        // Non-matching paths pass through to Vite's HMR handler
+      });
+
       server.httpServer?.once("listening", () => {
-        if (!server.httpServer) return;
-
-        wss = new WebSocketServer({
-          server: server.httpServer as any,
-          path: "/ws/keymap-sync",
-        });
-
-        wss.on("connection", (ws: WebSocket) => {
-          console.log("[keymap-sync] Client connected");
-
-          ws.on("message", (data: Buffer | string) => {
-            try {
-              const msg: SyncMessage = JSON.parse(data.toString());
-              handleMessage(ws, msg);
-            } catch (err: any) {
-              sendStatus(ws, false, `Invalid message: ${err.message}`);
-            }
-          });
-
-          ws.on("close", () => {
-            console.log("[keymap-sync] Client disconnected");
-            manager?.flush();
-          });
-        });
-
-        const addr = server.httpServer.address();
+        const addr = server.httpServer!.address();
         const port = typeof addr === "object" ? addr?.port : addr;
         console.log(
           `[keymap-sync] WebSocket server ready at ws://localhost:${port}/ws/keymap-sync`
@@ -108,8 +116,8 @@ export function keymapSyncPlugin(options: KeymapSyncPluginOptions = {}): Plugin 
         break;
       }
       case "LAYERS_CHANGED": {
-        // v2: full re-sync after layer structural changes
-        sendStatus(ws, false, "LAYERS_CHANGED not yet implemented (v2)");
+        const result = manager.onLayersChanged(msg);
+        sendStatus(ws, result.ok, result.message);
         break;
       }
       default:

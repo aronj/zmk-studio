@@ -318,6 +318,7 @@ export default function Keyboard() {
         if (resp.keymap?.moveLayer?.ok) {
           setKeymap(resp.keymap?.moveLayer?.ok);
           setSelectedLayerIndex(destIndex);
+          keymapSync.notifyLayersChanged();
         } else {
           console.error("Error moving", resp);
         }
@@ -349,6 +350,7 @@ export default function Keyboard() {
         );
 
         setSelectedLayerIndex(newSelection);
+        keymapSync.notifyLayersChanged();
 
         return resp.keymap.addLayer.ok.index;
       } else {
@@ -374,6 +376,7 @@ export default function Keyboard() {
             draft.availableLayers++;
           })
         );
+        keymapSync.notifyLayersChanged();
       } else {
         console.error("Remove error", resp.keymap?.removeLayer?.err);
         throw new Error(
@@ -408,6 +411,7 @@ export default function Keyboard() {
             draft.availableLayers++;
           })
         );
+        keymapSync.notifyLayersChanged();
       } else {
         console.error("Remove error", resp.keymap?.removeLayer?.err);
         throw new Error(
@@ -434,6 +438,7 @@ export default function Keyboard() {
           })
         );
         setSelectedLayerIndex(atIndex);
+        keymapSync.notifyLayersChanged();
       } else {
         console.error("Remove error", resp.keymap?.restoreLayer?.err);
         throw new Error(
@@ -477,6 +482,7 @@ export default function Keyboard() {
               draft.layers[layer_index].name = name;
             })
           );
+          keymapSync.notifyLayersChanged();
         } else {
           throw new Error(
             "Failed to change layer name:" + resp.keymap?.setLayerProps

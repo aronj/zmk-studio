@@ -333,8 +333,16 @@ export function resolveParams(
     const cmdName = behaviorTable.param1ToName.get(param1);
     if (cmdName) {
       if (behaviorTable.param2IsArg.has(param1)) {
-        // Command takes an argument: "BT_SEL 0"
-        params.push(cmdName, String(param2));
+        // Special case: RGB_COLOR_HSB encodes H, S, B in param2
+        if (cmdName === "RGB_COLOR_HSB") {
+          const h = (param2 >> 16) & 0xffff;
+          const s = (param2 >> 8) & 0xff;
+          const b = param2 & 0xff;
+          params.push(`RGB_COLOR_HSB(${h},${s},${b})`);
+        } else {
+          // Command takes an argument: "BT_SEL 0"
+          params.push(cmdName, String(param2));
+        }
       } else {
         // Command with no variable arg: "BT_CLR" (param2 is baked into the macro)
         params.push(cmdName);

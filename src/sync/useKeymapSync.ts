@@ -9,6 +9,7 @@ import type { GetBehaviorDetailsResponse } from "@zmkfirmware/zmk-studio-ts-clie
 import type {
   InitSyncMessage,
   BindingChangedMessage,
+  LayersChangedMessage,
   BehaviorMetadata,
   ParamType,
 } from "./types";
@@ -48,6 +49,7 @@ export interface KeymapSyncHandle {
     keyPosition: number,
     binding: BehaviorBinding
   ) => void;
+  notifyLayersChanged: () => void;
 }
 
 /**
@@ -178,7 +180,31 @@ export function useKeymapSync(
     []
   );
 
-  return { notifyBindingChange };
+  const notifyLayersChanged = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!initializedRef.current) return;
+
+    const km = keymapRef.current;
+    if (!km) return;
+
+    const msg: LayersChangedMessage = {
+      type: "LAYERS_CHANGED",
+      layers: km.layers.map((layer) => ({
+        id: layer.id,
+        name: layer.name,
+        bindings: layer.bindings.map((b) => ({
+          behaviorId: b.behaviorId,
+          param1: b.param1,
+          param2: b.param2,
+        })),
+      })),
+    };
+
+    wsRef.current.send(JSON.stringify(msg));
+    console.log("[keymap-sync] Sent LAYERS_CHANGED");
+  }, []);
+
+  return { notifyBindingChange, notifyLayersChanged };
 }
 
 function sendInitSync(
