@@ -31,6 +31,7 @@ import { LockStateContext } from "../rpc/LockStateContext";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import { deserializeLayoutZoom, LayoutZoom } from "./PhysicalLayout";
 import { useLocalStorageState } from "../misc/useLocalStorageState";
+import { useKeymapSync } from "../sync/useKeymapSync";
 
 type BehaviorMap = Record<number, GetBehaviorDetailsResponse>;
 
@@ -183,6 +184,7 @@ export default function Keyboard() {
     number | undefined
   >(undefined);
   const behaviors = useBehaviors();
+  const keymapSync = useKeymapSync(keymap, behaviors);
 
   const conn = useContext(ConnectionContext);
   const undoRedo = useContext(UndoRedoContext);
@@ -261,6 +263,7 @@ export default function Keyboard() {
               draft.layers[layer].bindings[keyPosition] = binding;
             })
           );
+          keymapSync.notifyBindingChange(layer, keyPosition, binding);
         } else {
           console.error("Failed to set binding", resp.keymap?.setLayerBinding);
         }
@@ -284,6 +287,7 @@ export default function Keyboard() {
                 draft.layers[layer].bindings[keyPosition] = oldBinding;
               })
             );
+            keymapSync.notifyBindingChange(layer, keyPosition, oldBinding);
           } else {
           }
         };
