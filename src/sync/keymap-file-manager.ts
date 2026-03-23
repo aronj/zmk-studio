@@ -556,7 +556,7 @@ export class KeymapFileManager {
 
     this.fmtTimer = setTimeout(() => {
       this.runFormatter();
-    }, 1000);
+    }, 200);
   }
 
   /**
