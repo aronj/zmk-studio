@@ -20,6 +20,12 @@ export interface KeymapProps {
   selectedLayerIndex: number;
   selectedKeyPosition: number | undefined;
   onKeyPositionClicked: (keyPosition: number) => void;
+  onKeyDragStart?: (position: number) => void;
+  onKeyDragOver?: (position: number) => void;
+  onKeyDrop?: (position: number, ctrlKey?: boolean) => void;
+  onKeyDragEnd?: () => void;
+  dragSourcePosition?: number | null;
+  dragOverPosition?: number | null;
 }
 
 export const Keymap = ({
@@ -30,6 +36,12 @@ export const Keymap = ({
   selectedLayerIndex,
   selectedKeyPosition,
   onKeyPositionClicked,
+  onKeyDragStart,
+  onKeyDragOver,
+  onKeyDrop,
+  onKeyDragEnd,
+  dragSourcePosition,
+  dragOverPosition,
 }: KeymapProps) => {
   if (!keymap.layers[selectedLayerIndex]) {
     return <></>;
@@ -76,6 +88,12 @@ export const Keymap = ({
       zoom={scale}
       selectedPosition={selectedKeyPosition}
       onPositionClicked={onKeyPositionClicked}
+      onKeyDragStart={onKeyDragStart}
+      onKeyDragOver={onKeyDragOver}
+      onKeyDrop={onKeyDrop}
+      onKeyDragEnd={onKeyDragEnd}
+      dragSourcePosition={dragSourcePosition}
+      dragOverPosition={dragOverPosition}
     />
   );
 };

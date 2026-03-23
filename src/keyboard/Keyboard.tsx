@@ -183,6 +183,8 @@ export default function Keyboard() {
   const [selectedKeyPosition, setSelectedKeyPosition] = useState<
     number | undefined
   >(undefined);
+  const [dragSourcePosition, setDragSourcePosition] = useState<number | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<number | null>(null);
   const behaviors = useBehaviors();
   const keymapSync = useKeymapSync(keymap, behaviors);
 
@@ -500,6 +502,172 @@ export default function Keyboard() {
     [conn, undoRedo, keymap]
   );
 
+  const onKeyDragStart = useCallback((position: number) => {
+    setDragSourcePosition(position);
+  }, []);
+
+  const onKeyDragOver = useCallback((position: number) => {
+    setDragOverPosition(position);
+  }, []);
+
+  const onKeyDragEnd = useCallback(() => {
+    setDragSourcePosition(null);
+    setDragOverPosition(null);
+  }, []);
+
+  const doSwapKeys = useCallback(
+    (sourcePos: number, targetPos: number) => {
+      if (!keymap || sourcePos === targetPos) return;
+
+      const swapData = keymap.layers.map((layer) => ({
+        layerId: layer.id,
+        sourceBinding: { ...layer.bindings[sourcePos] },
+        targetBinding: { ...layer.bindings[targetPos] },
+      }));
+
+      undoRedo?.(async () => {
+        if (!conn.conn) throw new Error("Not connected");
+
+        for (let li = 0; li < swapData.length; li++) {
+          const { layerId, sourceBinding, targetBinding } = swapData[li];
+
+          let resp1 = await call_rpc(conn.conn, {
+            keymap: { setLayerBinding: { layerId, keyPosition: sourcePos, binding: targetBinding } },
+          });
+          if (resp1.keymap?.setLayerBinding !== SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK) {
+            console.error("Failed to set binding during swap (source)", resp1);
+            return async () => {};
+          }
+
+          let resp2 = await call_rpc(conn.conn, {
+            keymap: { setLayerBinding: { layerId, keyPosition: targetPos, binding: sourceBinding } },
+          });
+          if (resp2.keymap?.setLayerBinding !== SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK) {
+            console.error("Failed to set binding during swap (target)", resp2);
+            return async () => {};
+          }
+        }
+
+        setKeymap(
+          produce((draft: any) => {
+            for (let li = 0; li < draft.layers.length; li++) {
+              const temp = { ...draft.layers[li].bindings[sourcePos] };
+              draft.layers[li].bindings[sourcePos] = draft.layers[li].bindings[targetPos];
+              draft.layers[li].bindings[targetPos] = temp;
+            }
+          })
+        );
+
+        for (let li = 0; li < swapData.length; li++) {
+          keymapSync.notifyBindingChange(li, sourcePos, swapData[li].targetBinding);
+          keymapSync.notifyBindingChange(li, targetPos, swapData[li].sourceBinding);
+        }
+
+        return async () => {
+          if (!conn.conn) return;
+          for (let li = 0; li < swapData.length; li++) {
+            const { layerId, sourceBinding, targetBinding } = swapData[li];
+            await call_rpc(conn.conn, {
+              keymap: { setLayerBinding: { layerId, keyPosition: sourcePos, binding: sourceBinding } },
+            });
+            await call_rpc(conn.conn, {
+              keymap: { setLayerBinding: { layerId, keyPosition: targetPos, binding: targetBinding } },
+            });
+          }
+          setKeymap(
+            produce((draft: any) => {
+              for (let li = 0; li < draft.layers.length; li++) {
+                const temp = { ...draft.layers[li].bindings[sourcePos] };
+                draft.layers[li].bindings[sourcePos] = draft.layers[li].bindings[targetPos];
+                draft.layers[li].bindings[targetPos] = temp;
+              }
+            })
+          );
+          for (let li = 0; li < swapData.length; li++) {
+            keymapSync.notifyBindingChange(li, sourcePos, swapData[li].sourceBinding);
+            keymapSync.notifyBindingChange(li, targetPos, swapData[li].targetBinding);
+          }
+        };
+      });
+    },
+    [conn, keymap, undoRedo, keymapSync]
+  );
+
+  const doOverwriteKey = useCallback(
+    (sourcePos: number, targetPos: number) => {
+      if (!keymap || sourcePos === targetPos) return;
+
+      const overwriteData = keymap.layers.map((layer) => ({
+        layerId: layer.id,
+        sourceBinding: { ...layer.bindings[sourcePos] },
+        oldTargetBinding: { ...layer.bindings[targetPos] },
+      }));
+
+      undoRedo?.(async () => {
+        if (!conn.conn) throw new Error("Not connected");
+
+        for (let li = 0; li < overwriteData.length; li++) {
+          const { layerId, sourceBinding } = overwriteData[li];
+          let resp = await call_rpc(conn.conn, {
+            keymap: { setLayerBinding: { layerId, keyPosition: targetPos, binding: sourceBinding } },
+          });
+          if (resp.keymap?.setLayerBinding !== SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK) {
+            console.error("Failed to overwrite binding", resp);
+            return async () => {};
+          }
+        }
+
+        setKeymap(
+          produce((draft: any) => {
+            for (let li = 0; li < draft.layers.length; li++) {
+              draft.layers[li].bindings[targetPos] = { ...draft.layers[li].bindings[sourcePos] };
+            }
+          })
+        );
+
+        for (let li = 0; li < overwriteData.length; li++) {
+          keymapSync.notifyBindingChange(li, targetPos, overwriteData[li].sourceBinding);
+        }
+
+        return async () => {
+          if (!conn.conn) return;
+          for (let li = 0; li < overwriteData.length; li++) {
+            const { layerId, oldTargetBinding } = overwriteData[li];
+            await call_rpc(conn.conn, {
+              keymap: { setLayerBinding: { layerId, keyPosition: targetPos, binding: oldTargetBinding } },
+            });
+          }
+          setKeymap(
+            produce((draft: any) => {
+              for (let li = 0; li < draft.layers.length; li++) {
+                draft.layers[li].bindings[targetPos] = overwriteData[li].oldTargetBinding;
+              }
+            })
+          );
+          for (let li = 0; li < overwriteData.length; li++) {
+            keymapSync.notifyBindingChange(li, targetPos, overwriteData[li].oldTargetBinding);
+          }
+        };
+      });
+    },
+    [conn, keymap, undoRedo, keymapSync]
+  );
+
+  const onKeyDrop = useCallback(
+    (targetPosition: number, ctrlKey?: boolean) => {
+      if (dragSourcePosition !== null && dragSourcePosition !== targetPosition) {
+        if (ctrlKey) {
+          doOverwriteKey(dragSourcePosition, targetPosition);
+        } else {
+          doSwapKeys(dragSourcePosition, targetPosition);
+        }
+      }
+      setDragSourcePosition(null);
+      setDragOverPosition(null);
+    },
+    [dragSourcePosition, doSwapKeys, doOverwriteKey]
+  );
+
   useEffect(() => {
     if (!keymap?.layers) return;
 
@@ -549,6 +717,12 @@ export default function Keyboard() {
             selectedLayerIndex={selectedLayerIndex}
             selectedKeyPosition={selectedKeyPosition}
             onKeyPositionClicked={setSelectedKeyPosition}
+            onKeyDragStart={onKeyDragStart}
+            onKeyDragOver={onKeyDragOver}
+            onKeyDrop={onKeyDrop}
+            onKeyDragEnd={onKeyDragEnd}
+            dragSourcePosition={dragSourcePosition}
+            dragOverPosition={dragOverPosition}
           />
           <select
             className="absolute top-2 right-2 h-8 rounded px-2"

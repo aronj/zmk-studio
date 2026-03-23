@@ -35,6 +35,12 @@ interface PhysicalLayoutProps {
   hoverZoom?: boolean;
   zoom?: LayoutZoom;
   onPositionClicked?: (position: number) => void;
+  onKeyDragStart?: (position: number) => void;
+  onKeyDragOver?: (position: number) => void;
+  onKeyDrop?: (position: number, ctrlKey?: boolean) => void;
+  onKeyDragEnd?: () => void;
+  dragSourcePosition?: number | null;
+  dragOverPosition?: number | null;
 }
 
 interface PhysicalLayoutPositionLocation {
@@ -76,6 +82,12 @@ export const PhysicalLayout = ({
   selectedPosition,
   oneU = 48,
   onPositionClicked,
+  onKeyDragStart,
+  onKeyDragOver,
+  onKeyDrop,
+  onKeyDragEnd,
+  dragSourcePosition,
+  dragOverPosition,
   ...props
 }: PhysicalLayoutProps) => {
   const ref = useRef<HTMLDivElement>(null);
@@ -123,21 +135,45 @@ export const PhysicalLayout = ({
     .map((k) => k.y + k.height)
     .reduce((a, b) => Math.max(a, b), 0);
 
-  const positionItems = positions.map((p, idx) => (
-    <div className="absolute" style={scalePosition(p, oneU)}>
+  const positionItems = positions.map((p, idx) => {
+    const isDropTarget = idx === dragOverPosition && dragSourcePosition !== null && dragSourcePosition !== idx;
+    return (
       <div
-        key={p.id}
-        onClick={() => onPositionClicked?.(idx)}
-        className="hover:[transform:translateZ(100px)] transition-transform duration-200"
+        className={`absolute ${isDropTarget ? "z-50" : ""}`}
+        style={scalePosition(p, oneU)}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", String(idx));
+          onKeyDragStart?.(idx);
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = e.ctrlKey ? "copy" : "move";
+          onKeyDragOver?.(idx);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          onKeyDrop?.(idx, e.ctrlKey);
+        }}
+        onDragEnd={() => onKeyDragEnd?.()}
       >
-        <Key
-          oneU={oneU}
-          selected={idx === selectedPosition}
-          {...p}
-        />
+        <div
+          key={p.id}
+          onClick={() => onPositionClicked?.(idx)}
+          className="hover:[transform:translateZ(100px)] transition-transform duration-200"
+        >
+          <Key
+            oneU={oneU}
+            selected={idx === selectedPosition}
+            isDragSource={idx === dragSourcePosition}
+            isDragOver={isDropTarget}
+            {...p}
+          />
+        </div>
       </div>
-    </div>
-  ));
+    );
+  });
 
   return (
     <div

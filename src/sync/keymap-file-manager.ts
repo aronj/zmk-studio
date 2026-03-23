@@ -5,6 +5,7 @@
  */
 
 import * as fs from "fs";
+import { exec } from "child_process";
 import {
   type ParsedKeymap,
   parseKeymapFile,
@@ -28,6 +29,10 @@ export interface KeymapFileManagerConfig {
   keymapPath: string;
   /** Path to ZMK firmware root (containing app/include/) */
   zmkFirmwarePath: string;
+  /** Shell command to run after writing the .keymap file (e.g., formatter) */
+  fmtCommand?: string;
+  /** Working directory for fmtCommand */
+  fmtCwd?: string;
 }
 
 export class KeymapFileManager {
@@ -43,6 +48,9 @@ export class KeymapFileManager {
   /** Debounce timer for file writes */
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingWrite: string | null = null;
+
+  /** Debounce timer for post-write formatter */
+  private fmtTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** File watcher for external changes */
   private watcher: fs.FSWatcher | null = null;
@@ -515,12 +523,15 @@ export class KeymapFileManager {
   private flushWrite(): void {
     if (!this.pendingWrite) return;
 
+    const writeStart = performance.now();
     const tmpPath = this.config.keymapPath + ".tmp";
     try {
       fs.writeFileSync(tmpPath, this.pendingWrite, "utf-8");
       fs.renameSync(tmpPath, this.config.keymapPath);
       this.lastWriteTime = Date.now();
-      console.log(`[keymap-sync] Written to ${this.config.keymapPath}`);
+      const writeMs = (performance.now() - writeStart).toFixed(1);
+      console.log(`[keymap-sync] Write completed in ${writeMs}ms → ${this.config.keymapPath}`);
+      this.scheduleFormatter();
     } catch (err: any) {
       console.error(`[keymap-sync] Failed to write: ${err.message}`);
       // Clean up temp file on failure
@@ -532,10 +543,58 @@ export class KeymapFileManager {
     this.writeTimer = null;
   }
 
+  /**
+   * Schedule the post-write formatter with its own debounce.
+   * Coalesces rapid writes so the formatter only runs once.
+   */
+  private scheduleFormatter(): void {
+    if (!this.config.fmtCommand) return;
+
+    if (this.fmtTimer) {
+      clearTimeout(this.fmtTimer);
+    }
+
+    this.fmtTimer = setTimeout(() => {
+      this.runFormatter();
+    }, 1000);
+  }
+
+  /**
+   * Run the configured formatter command, then re-read the file
+   * so our in-memory state stays in sync with the formatted output.
+   */
+  private runFormatter(): void {
+    const { fmtCommand, fmtCwd } = this.config;
+    if (!fmtCommand) return;
+
+    const fmtStart = performance.now();
+    exec(fmtCommand, { cwd: fmtCwd }, (err, _stdout, stderr) => {
+      const fmtMs = (performance.now() - fmtStart).toFixed(1);
+      if (err) {
+        console.error(`[keymap-sync] Formatter failed in ${fmtMs}ms: ${err.message}`);
+        if (stderr) console.error(`[keymap-sync] Formatter stderr: ${stderr}`);
+        return;
+      }
+      console.log(`[keymap-sync] Formatter completed in ${fmtMs}ms`);
+
+      // Re-read the formatted file so in-memory state stays current
+      this.lastWriteTime = Date.now();
+      try {
+        const content = fs.readFileSync(this.config.keymapPath, "utf-8");
+        this.parsed = parseKeymapFile(content);
+      } catch (readErr: any) {
+        console.warn(`[keymap-sync] Failed to re-read after format: ${readErr.message}`);
+      }
+    });
+  }
+
   /** Flush any pending writes immediately (for cleanup). */
   flush(): void {
     if (this.writeTimer) {
       clearTimeout(this.writeTimer);
+    }
+    if (this.fmtTimer) {
+      clearTimeout(this.fmtTimer);
     }
     this.flushWrite();
     this.stopFileWatch();

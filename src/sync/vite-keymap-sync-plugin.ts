@@ -36,11 +36,16 @@ export function keymapSyncPlugin(options: KeymapSyncPluginOptions = {}): Plugin 
         process.env.ZMK_FIRMWARE_PATH ??
         path.resolve(studioRoot, "..", "zmk");
 
+      const zmkRoot = path.resolve(studioRoot, "..");
+      const fmtCommand = `cargo run --quiet --manifest-path tools/keymap-fmt/Cargo.toml -- -i ${keymapPath}`;
+      const fmtCwd = zmkRoot;
+
       console.log(`[keymap-sync] Keymap path: ${keymapPath}`);
       console.log(`[keymap-sync] ZMK firmware path: ${zmkFirmwarePath}`);
+      console.log(`[keymap-sync] Formatter command: ${fmtCommand}`);
 
       try {
-        manager = new KeymapFileManager({ keymapPath, zmkFirmwarePath });
+        manager = new KeymapFileManager({ keymapPath, zmkFirmwarePath, fmtCommand, fmtCwd });
       } catch (err: any) {
         console.error(
           `[keymap-sync] Failed to initialize: ${err.message}. Sync disabled.`

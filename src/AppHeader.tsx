@@ -7,14 +7,15 @@ import {
 } from "react-aria-components";
 import { useConnectedDeviceData } from "./rpc/useConnectedDeviceData";
 import { useSub } from "./usePubSub";
-import { useContext, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useModalRef } from "./misc/useModalRef";
 import { LockStateContext } from "./rpc/LockStateContext";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 import { ConnectionContext } from "./rpc/ConnectionContext";
-import { ChevronDown, Undo2, Redo2, Save, Trash2 } from "lucide-react";
+import { ChevronDown, Undo2, Redo2, Save, Trash2, Check } from "lucide-react";
 import { Tooltip } from "./misc/Tooltip";
 import { GenericModal } from "./GenericModal";
+import { useLocalStorageState } from "./misc/useLocalStorageState";
 
 export interface AppHeaderProps {
   connectedDeviceLabel?: string;
@@ -63,6 +64,35 @@ export const AppHeader = ({
   useSub("rpc_notification.keymap.unsavedChangesStatusChanged", (unsaved) =>
     setUnsaved(unsaved)
   );
+
+  const [autosave, setAutosave] = useLocalStorageState<boolean>(
+    "zmk-studio-autosave",
+    false,
+    { deserialize: (v) => v === "true" },
+  );
+
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stableOnSave = useCallback(() => onSave?.(), [onSave]);
+
+  useEffect(() => {
+    if (!autosave || !unsaved || !onSave) {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      return;
+    }
+    autosaveTimerRef.current = setTimeout(() => {
+      stableOnSave();
+      autosaveTimerRef.current = null;
+    }, 500);
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    };
+  }, [autosave, unsaved, stableOnSave]);
 
   return (
     <header className="top-0 left-0 right-0 grid grid-cols-[1fr_auto_1fr] items-center justify-between h-10 max-w-full">
@@ -146,15 +176,35 @@ export const AppHeader = ({
             </Button>
           </Tooltip>
         )}
-        <Tooltip label="Save">
-          <Button
-            className="flex items-center justify-center p-1.5 rounded enabled:hover:bg-base-300 disabled:opacity-50"
-            isDisabled={!unsaved}
-            onPress={onSave}
-          >
-            <Save className="inline-block w-4 mx-1" aria-label="Save" />
-          </Button>
-        </Tooltip>
+        <div className="flex items-center">
+          <Tooltip label={autosave ? "Save (autosave on)" : "Save"}>
+            <Button
+              className="flex items-center justify-center p-1.5 rounded-l enabled:hover:bg-base-300 disabled:opacity-50"
+              isDisabled={!unsaved}
+              onPress={onSave}
+            >
+              <Save className={`inline-block w-4 mx-1 ${autosave ? "text-accent" : ""}`} aria-label="Save" />
+            </Button>
+          </Tooltip>
+          <MenuTrigger>
+            <Button className="flex items-center justify-center p-0.5 rounded-r hover:bg-base-300">
+              <ChevronDown className="w-3" />
+            </Button>
+            <Popover>
+              <Menu className="shadow-md rounded bg-base-100 text-base-content cursor-pointer overflow-hidden">
+                <MenuItem
+                  className="px-3 py-1.5 hover:bg-base-200 flex items-center gap-2"
+                  onAction={() => setAutosave(!autosave)}
+                >
+                  <span className="w-4 flex items-center justify-center">
+                    {autosave && <Check className="w-3.5 h-3.5" />}
+                  </span>
+                  Autosave
+                </MenuItem>
+              </Menu>
+            </Popover>
+          </MenuTrigger>
+        </div>
         <Tooltip label="Discard">
           <Button
             className="flex items-center justify-center p-1.5 rounded enabled:hover:bg-base-300 disabled:opacity-50"

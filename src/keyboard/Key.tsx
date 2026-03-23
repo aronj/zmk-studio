@@ -8,6 +8,8 @@ interface KeyProps {
   oneU: number;
   header?: string;
   onClick?: () => void;
+  isDragSource?: boolean;
+  isDragOver?: boolean;
 }
 
 interface BehaviorShortName {
@@ -41,14 +43,22 @@ export const Key = ({
   oneU,
   header,
   onClick,
+  isDragSource = false,
+  isDragOver = false,
   children,
 }: PropsWithChildren<KeyProps>) => {
   const pixelWidth = width * oneU - 2;
   const pixelHeight = height * oneU - 2;
 
+  const dragClasses = isDragSource
+    ? "opacity-40 ring-2 ring-dashed ring-gray-400"
+    : isDragOver
+      ? "ring-2 ring-accent scale-110 shadow-lg"
+      : "hover:shadow-xl hover:ring-1 hover:ring-gray-300 hover:scale-125";
+
   return (
     <button
-      className={`group rounded relative flex justify-center items-center cursor-pointer transition-all hover:shadow-xl hover:ring-1 hover:ring-gray-300 hover:scale-125 ${selected ? "bg-primary text-primary-content" : "bg-base-100 text-base-content"
+      className={`group rounded relative flex justify-center items-center cursor-grab transition-all ${dragClasses} ${selected ? "bg-primary text-primary-content" : "bg-base-100 text-base-content"
         }`}
       style={{
         width: `${pixelWidth}px`,
