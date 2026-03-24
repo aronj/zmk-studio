@@ -15,12 +15,17 @@ import {
   type ConstantTables,
   buildConstantTables,
   resolveParams,
+  unresolveParams,
+  splitParams,
 } from "./zmk-constants";
 import type {
   InitSyncMessage,
   BindingChangedMessage,
   LayersChangedMessage,
   BehaviorMetadata,
+  BehaviorBindingData,
+  FileBindingChangedMessage,
+  FileFullResyncMessage,
   ParamType,
 } from "./types";
 
@@ -42,6 +47,8 @@ export class KeymapFileManager {
 
   /** behaviorId → behavior short name (e.g., 0 → "kp", 5 → "mo") */
   private behaviorIdToName = new Map<number, string>();
+  /** Reverse: behavior short name → behaviorId */
+  private behaviorNameToId = new Map<string, number>();
   /** Behavior metadata from RPC */
   private behaviorMeta = new Map<number, BehaviorMetadata>();
 
@@ -56,6 +63,13 @@ export class KeymapFileManager {
   private watcher: fs.FSWatcher | null = null;
   /** Timestamp of our last write, to ignore self-triggered watch events */
   private lastWriteTime = 0;
+  /** Flag-based loop protection: suppress file watcher during our own writes */
+  private suppressFileWatch = false;
+  /** Debounce timer for file watcher to coalesce rapid external edits */
+  private watchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Callback for emitting file-originated changes to connected clients */
+  private onFileChanged?: (messages: (FileBindingChangedMessage | FileFullResyncMessage)[]) => void;
 
   constructor(config: KeymapFileManagerConfig) {
     this.config = config;
@@ -92,8 +106,9 @@ export class KeymapFileManager {
         return { ok: false, message };
       }
 
-      // Build behavior ID → name mapping by positional alignment
+      // Build behavior ID ↔ name mapping by positional alignment
       this.behaviorIdToName.clear();
+      this.behaviorNameToId.clear();
       for (let li = 0; li < msg.layers.length; li++) {
         const kbLayer = msg.layers[li];
         const fileLayer = this.parsed.layers[li];
@@ -115,6 +130,7 @@ export class KeymapFileManager {
           const behaviorName = extractBehaviorName(fileBinding.text);
           if (behaviorName && !this.behaviorIdToName.has(kbBinding.behaviorId)) {
             this.behaviorIdToName.set(kbBinding.behaviorId, behaviorName);
+            this.behaviorNameToId.set(behaviorName, kbBinding.behaviorId);
           }
         }
       }
@@ -267,6 +283,7 @@ export class KeymapFileManager {
 
       // Re-align all bindings: rebuild behavior mapping and update all bindings
       this.behaviorIdToName.clear();
+      this.behaviorNameToId.clear();
       for (let li = 0; li < msg.layers.length; li++) {
         const kbLayer = msg.layers[li];
         const fileLayer = this.parsed.layers[li];
@@ -285,6 +302,7 @@ export class KeymapFileManager {
           const behaviorName = extractBehaviorName(fileBinding.text);
           if (behaviorName && !this.behaviorIdToName.has(kbBinding.behaviorId)) {
             this.behaviorIdToName.set(kbBinding.behaviorId, behaviorName);
+            this.behaviorNameToId.set(behaviorName, kbBinding.behaviorId);
           }
         }
       }
@@ -506,6 +524,7 @@ export class KeymapFileManager {
    * Multiple rapid changes (e.g., undo/redo) are coalesced.
    */
   private scheduleWrite(content: string): void {
+    this.suppressFileWatch = true;
     this.pendingWrite = content;
 
     if (this.writeTimer) {
@@ -532,8 +551,13 @@ export class KeymapFileManager {
       const writeMs = (performance.now() - writeStart).toFixed(1);
       console.log(`[keymap-sync] Write completed in ${writeMs}ms → ${this.config.keymapPath}`);
       this.scheduleFormatter();
+      // If no formatter configured, clear suppress flag now
+      if (!this.config.fmtCommand) {
+        this.suppressFileWatch = false;
+      }
     } catch (err: any) {
       console.error(`[keymap-sync] Failed to write: ${err.message}`);
+      this.suppressFileWatch = false;
       // Clean up temp file on failure
       try {
         fs.unlinkSync(tmpPath);
@@ -573,6 +597,7 @@ export class KeymapFileManager {
       if (err) {
         console.error(`[keymap-sync] Formatter failed in ${fmtMs}ms: ${err.message}`);
         if (stderr) console.error(`[keymap-sync] Formatter stderr: ${stderr}`);
+        this.suppressFileWatch = false;
         return;
       }
       console.log(`[keymap-sync] Formatter completed in ${fmtMs}ms`);
@@ -585,6 +610,7 @@ export class KeymapFileManager {
       } catch (readErr: any) {
         console.warn(`[keymap-sync] Failed to re-read after format: ${readErr.message}`);
       }
+      this.suppressFileWatch = false;
     });
   }
 
@@ -596,45 +622,199 @@ export class KeymapFileManager {
     if (this.fmtTimer) {
       clearTimeout(this.fmtTimer);
     }
+    if (this.watchDebounceTimer) {
+      clearTimeout(this.watchDebounceTimer);
+    }
     this.flushWrite();
     this.stopFileWatch();
   }
 
   /**
+   * Register a callback for file-originated changes.
+   * Called when the .keymap file is modified externally and bindings differ.
+   */
+  setFileChangeCallback(
+    cb: (messages: (FileBindingChangedMessage | FileFullResyncMessage)[]) => void
+  ): void {
+    this.onFileChanged = cb;
+  }
+
+  /**
+   * Diff two parsed keymaps and return changed bindings.
+   * Returns null if layer structure changed (caller should trigger full resync).
+   */
+  private diffBindings(
+    oldParsed: ParsedKeymap,
+    newParsed: ParsedKeymap
+  ): { layerIndex: number; keyPosition: number; newText: string }[] | null {
+    if (oldParsed.layers.length !== newParsed.layers.length) {
+      return null; // Layer structure changed
+    }
+
+    const diffs: { layerIndex: number; keyPosition: number; newText: string }[] = [];
+
+    for (let li = 0; li < oldParsed.layers.length; li++) {
+      const oldLayer = oldParsed.layers[li];
+      const newLayer = newParsed.layers[li];
+
+      if (oldLayer.bindings.length !== newLayer.bindings.length) {
+        return null; // Binding count changed within a layer
+      }
+
+      for (let ki = 0; ki < oldLayer.bindings.length; ki++) {
+        if (oldLayer.bindings[ki].text !== newLayer.bindings[ki].text) {
+          diffs.push({
+            layerIndex: li,
+            keyPosition: ki,
+            newText: newLayer.bindings[ki].text,
+          });
+        }
+      }
+    }
+
+    return diffs;
+  }
+
+  /**
+   * Convert a text binding (e.g., "&kp A") to numeric BehaviorBindingData.
+   * Returns null if the behavior is unknown or params can't be resolved.
+   */
+  private textToNumeric(bindingText: string): BehaviorBindingData | null {
+    const behaviorName = extractBehaviorName(bindingText);
+    if (!behaviorName) return null;
+
+    const behaviorId = this.behaviorNameToId.get(behaviorName);
+    if (behaviorId === undefined) return null;
+
+    const paramTypes = this.getParamTypes(behaviorId);
+
+    // 0-cell behavior: no params
+    if (paramTypes.length === 0) {
+      return { behaviorId, param1: 0, param2: 0 };
+    }
+
+    // Extract param text: everything after "&behaviorName "
+    const paramStr = bindingText.replace(/^&\w+\s*/, "").trim();
+    const paramTexts = paramStr ? splitParams(paramStr) : [];
+
+    if (paramTexts.length === 0 && paramTypes.length > 0) {
+      // Has param types but no params in text — can't resolve
+      return null;
+    }
+
+    const { param1, param2 } = unresolveParams(
+      behaviorName,
+      paramTexts,
+      this.tables,
+      this.parsed!.allDefines,
+      paramTypes
+    );
+
+    return { behaviorId, param1, param2 };
+  }
+
+  /**
    * Start watching the .keymap file for external changes.
-   * If the file is modified externally (e.g., manual edit, git checkout),
-   * re-read and re-parse it so the in-memory state stays fresh.
+   * When changes are detected, diffs against current state and emits
+   * FILE_BINDING_CHANGED messages to connected clients for reverse sync.
    */
   private startFileWatch(): void {
     this.stopFileWatch();
 
     try {
       this.watcher = fs.watch(this.config.keymapPath, (_eventType) => {
-        // Ignore changes triggered by our own writes (within 1 second)
+        // Ignore changes triggered by our own writes
+        if (this.suppressFileWatch) return;
         if (Date.now() - this.lastWriteTime < 1000) return;
 
-        console.log("[keymap-sync] External file change detected, re-reading...");
-        try {
-          const content = fs.readFileSync(this.config.keymapPath, "utf-8");
-          const newParsed = parseKeymapFile(content);
-
-          // Check if re-parsed file is still compatible
-          if (this.parsed && newParsed.layers.length === this.parsed.layers.length) {
-            this.parsed = newParsed;
-            console.log("[keymap-sync] File re-read successfully, sync continues.");
-          } else {
-            console.warn(
-              "[keymap-sync] File changed with different layer count. " +
-                "Sync paused until next INIT_SYNC."
-            );
-            this.parsed = null;
-          }
-        } catch (err: any) {
-          console.warn(`[keymap-sync] Failed to re-read file: ${err.message}`);
+        // Debounce rapid external edits (e.g., formatter, save-on-type)
+        if (this.watchDebounceTimer) {
+          clearTimeout(this.watchDebounceTimer);
         }
+        this.watchDebounceTimer = setTimeout(() => {
+          this.handleExternalFileChange();
+        }, 200);
       });
     } catch (err: any) {
       console.warn(`[keymap-sync] Could not watch file: ${err.message}`);
+    }
+  }
+
+  /**
+   * Process an external file change: diff, convert, and emit changes.
+   */
+  private handleExternalFileChange(): void {
+    console.log("[keymap-sync] External file change detected, re-reading...");
+    try {
+      const content = fs.readFileSync(this.config.keymapPath, "utf-8");
+      const newParsed = parseKeymapFile(content);
+      const oldParsed = this.parsed;
+
+      if (!oldParsed) {
+        this.parsed = newParsed;
+        console.log("[keymap-sync] File re-read (no prior state to diff).");
+        return;
+      }
+
+      // Diff bindings
+      const diffs = this.diffBindings(oldParsed, newParsed);
+
+      if (diffs === null) {
+        // Layer structure changed — emit full resync warning
+        console.warn(
+          "[keymap-sync] File changed with different layer structure. " +
+            "Emitting full resync notification."
+        );
+        this.parsed = newParsed;
+
+        // Build full resync message with all bindings converted to numeric
+        const layers = newParsed.layers.map((layer, li) => ({
+          id: li,
+          name: layer.name,
+          bindings: layer.bindings.map((b) => {
+            const numeric = this.textToNumeric(b.text);
+            return numeric ?? { behaviorId: 0, param1: 0, param2: 0 };
+          }),
+        }));
+
+        this.onFileChanged?.([{ type: "FILE_FULL_RESYNC", layers }]);
+        return;
+      }
+
+      this.parsed = newParsed;
+
+      if (diffs.length === 0) {
+        console.log("[keymap-sync] File re-read, no binding changes detected.");
+        return;
+      }
+
+      // Convert diffs to numeric and emit
+      const messages: FileBindingChangedMessage[] = [];
+      for (const diff of diffs) {
+        const numeric = this.textToNumeric(diff.newText);
+        if (numeric) {
+          messages.push({
+            type: "FILE_BINDING_CHANGED",
+            layerIndex: diff.layerIndex,
+            keyPosition: diff.keyPosition,
+            binding: numeric,
+          });
+        } else {
+          console.warn(
+            `[keymap-sync] Could not resolve binding "${diff.newText}" at ` +
+              `layer ${diff.layerIndex}, key ${diff.keyPosition} — skipping`
+          );
+        }
+      }
+
+      if (messages.length > 0) {
+        console.log(
+          `[keymap-sync] External edit: ${messages.length} binding change(s) detected, pushing to Studio`
+        );
+        this.onFileChanged?.(messages);
+      }
+    } catch (err: any) {
+      console.warn(`[keymap-sync] Failed to re-read file: ${err.message}`);
     }
   }
 

@@ -11,6 +11,8 @@ import type {
   BindingChangedMessage,
   LayersChangedMessage,
   BehaviorMetadata,
+  BehaviorBindingData,
+  FileFullResyncMessage,
   ParamType,
 } from "./types";
 
@@ -59,16 +61,22 @@ export interface KeymapSyncHandle {
  */
 export function useKeymapSync(
   keymap: Keymap | undefined,
-  behaviors: BehaviorMap
+  behaviors: BehaviorMap,
+  onFileBindingChanged?: (layerIndex: number, keyPosition: number, binding: BehaviorBindingData) => void,
+  onFileFullResync?: (layers: FileFullResyncMessage["layers"]) => void,
 ): KeymapSyncHandle {
   const wsRef = useRef<WebSocket | null>(null);
   const initializedRef = useRef(false);
   // Store latest values in refs to avoid stale closures and re-render loops
   const keymapRef = useRef(keymap);
   const behaviorsRef = useRef(behaviors);
+  const onFileBindingChangedRef = useRef(onFileBindingChanged);
+  const onFileFullResyncRef = useRef(onFileFullResync);
 
   keymapRef.current = keymap;
   behaviorsRef.current = behaviors;
+  onFileBindingChangedRef.current = onFileBindingChanged;
+  onFileFullResyncRef.current = onFileFullResync;
 
   // Try to send init sync if we have everything ready
   const trySendInitSync = useCallback(() => {
@@ -116,6 +124,20 @@ export function useKeymapSync(
             } else {
               console.warn(`[keymap-sync] Error: ${msg.message}`);
             }
+          } else if (msg.type === "FILE_BINDING_CHANGED") {
+            console.log(
+              `[keymap-sync] File change: layer ${msg.layerIndex}, key ${msg.keyPosition}`
+            );
+            onFileBindingChangedRef.current?.(
+              msg.layerIndex,
+              msg.keyPosition,
+              msg.binding
+            );
+          } else if (msg.type === "FILE_FULL_RESYNC") {
+            console.log(
+              `[keymap-sync] File full resync: ${msg.layers.length} layers`
+            );
+            onFileFullResyncRef.current?.(msg.layers);
           }
         } catch {}
       };

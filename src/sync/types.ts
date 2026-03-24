@@ -52,3 +52,26 @@ export interface StatusMessage {
   ok: boolean;
   message: string;
 }
+
+/** Sent when an external file edit changes a single binding */
+export interface FileBindingChangedMessage {
+  type: "FILE_BINDING_CHANGED";
+  layerIndex: number;
+  keyPosition: number;
+  binding: BehaviorBindingData;
+}
+
+/** Sent when file edit changes layer structure (add/remove layers) */
+export interface FileFullResyncMessage {
+  type: "FILE_FULL_RESYNC";
+  layers: {
+    id: number;
+    name: string;
+    bindings: BehaviorBindingData[];
+  }[];
+}
+
+export type ServerMessage =
+  | StatusMessage
+  | FileBindingChangedMessage
+  | FileFullResyncMessage;

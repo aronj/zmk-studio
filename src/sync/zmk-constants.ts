@@ -36,6 +36,8 @@ export interface ConstantTables {
   behaviorConstants: Map<string, BehaviorConstantTable>;
   /** Mouse button constants */
   mouseButtons: Map<number, string>;
+  /** Reverse: mouse button name → numeric value */
+  nameToMouseButton: Map<string, number>;
 }
 
 export interface BehaviorConstantTable {
@@ -46,6 +48,8 @@ export interface BehaviorConstantTable {
    * and param2 is appended as a number.
    */
   param1ToName: Map<number, string>;
+  /** Reverse: constant name → param1 value */
+  nameToParam1: Map<string, number>;
   /** param1 values where param2 is a user-provided argument (not fixed to 0) */
   param2IsArg: Set<number>;
 }
@@ -155,16 +159,18 @@ function buildBehaviorTable(
   entries: { name: string; param1: number; param2IsArg: boolean }[]
 ): BehaviorConstantTable {
   const param1ToName = new Map<number, string>();
+  const nameToParam1 = new Map<string, number>();
   const param2IsArg = new Set<number>();
 
   for (const entry of entries) {
     param1ToName.set(entry.param1, entry.name);
+    nameToParam1.set(entry.name, entry.param1);
     if (entry.param2IsArg) {
       param2IsArg.add(entry.param1);
     }
   }
 
-  return { param1ToName, param2IsArg };
+  return { param1ToName, nameToParam1, param2IsArg };
 }
 
 /**
@@ -304,7 +310,13 @@ export function buildConstantTables(zmkFirmwarePath: string): ConstantTables {
   mouseButtons.set(8, "MB4");     // BIT(3)
   mouseButtons.set(16, "MB5");    // BIT(4)
 
-  return { hidToName, nameToHid, behaviorConstants, mouseButtons };
+  // 7. Reverse mouse button map
+  const nameToMouseButton = new Map<string, number>();
+  for (const [value, name] of mouseButtons) {
+    nameToMouseButton.set(name, value);
+  }
+
+  return { hidToName, nameToHid, behaviorConstants, mouseButtons, nameToMouseButton };
 }
 
 /**
@@ -378,4 +390,124 @@ export function resolveParams(
   }
 
   return params;
+}
+
+/**
+ * Split binding parameter text on whitespace, respecting parentheses depth.
+ * E.g., "RGB_COLOR_HSB(120,100,50)" stays as one token,
+ *        "NAV SPACE" splits into ["NAV", "SPACE"].
+ */
+export function splitParams(text: string): string[] {
+  const params: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || (text[i] === " " && depth === 0)) {
+      if (i > start) params.push(text.substring(start, i));
+      start = i + 1;
+    } else if (text[i] === "(") {
+      depth++;
+    } else if (text[i] === ")") {
+      depth--;
+    }
+  }
+  return params;
+}
+
+/**
+ * Parse a possibly modifier-wrapped key name to its numeric HID value.
+ * E.g., "A" → 0x70004, "LC(A)" → 0x01070004, "LS(LC(X))" → 0x03070019
+ */
+export function parseModifierWrappedKey(
+  text: string,
+  nameToHid: Map<string, number>
+): number | null {
+  // Check for modifier wrapper: XX(inner)
+  const wrapperMatch = text.match(/^(LC|LS|LA|LG|RC|RS|RA|RG)\((.+)\)$/);
+  if (wrapperMatch) {
+    const modName = wrapperMatch[1];
+    const inner = wrapperMatch[2];
+    const modBit = MOD_BITS.find(([, n]) => n === modName)?.[0];
+    if (modBit === undefined) return null;
+
+    const innerValue = parseModifierWrappedKey(inner, nameToHid);
+    if (innerValue === null) return null;
+
+    // OR the modifier bit into position 24
+    return innerValue | (modBit << 24);
+  }
+
+  // Base case: plain key name
+  return nameToHid.get(text) ?? null;
+}
+
+/**
+ * Reverse of resolveParams: convert text parameter tokens back to numeric values.
+ *
+ * @param behaviorName The behavior short name (e.g., "kp", "bt", "mo")
+ * @param paramTexts Text tokens after the behavior name (e.g., ["A"], ["NAV", "SPACE"], ["BT_SEL", "0"])
+ * @param tables Constant lookup tables
+ * @param allDefines All #define constants from the keymap file (name → value)
+ * @param paramTypes Parameter type descriptors from behavior metadata
+ */
+export function unresolveParams(
+  behaviorName: string,
+  paramTexts: string[],
+  tables: ConstantTables,
+  allDefines: Map<string, number>,
+  paramTypes: string[]
+): { param1: number; param2: number } {
+  // Check for behavior-specific constant table first
+  const behaviorTable = tables.behaviorConstants.get(behaviorName);
+  if (behaviorTable && paramTexts.length > 0) {
+    // Special case: RGB_COLOR_HSB(h,s,b)
+    const rgbMatch = paramTexts[0].match(/^RGB_COLOR_HSB\((\d+),(\d+),(\d+)\)$/);
+    if (rgbMatch) {
+      const p1 = behaviorTable.nameToParam1.get("RGB_COLOR_HSB");
+      if (p1 !== undefined) {
+        const h = parseInt(rgbMatch[1], 10);
+        const s = parseInt(rgbMatch[2], 10);
+        const b = parseInt(rgbMatch[3], 10);
+        return { param1: p1, param2: (h << 16) | (s << 8) | b };
+      }
+    }
+
+    const p1 = behaviorTable.nameToParam1.get(paramTexts[0]);
+    if (p1 !== undefined) {
+      if (behaviorTable.param2IsArg.has(p1) && paramTexts.length > 1) {
+        return { param1: p1, param2: parseInt(paramTexts[1], 10) || 0 };
+      }
+      return { param1: p1, param2: 0 };
+    }
+  }
+
+  // Handle each param based on type
+  let param1 = 0;
+  let param2 = 0;
+
+  for (let i = 0; i < paramTypes.length && i < paramTexts.length; i++) {
+    const pType = paramTypes[i];
+    const text = paramTexts[i];
+    let value = 0;
+
+    if (pType === "hidUsage") {
+      const resolved = parseModifierWrappedKey(text, tables.nameToHid);
+      value = resolved ?? (parseInt(text, 10) || 0);
+    } else if (pType === "layerId") {
+      value = allDefines.get(text) ?? (parseInt(text, 10) || 0);
+    } else if (pType === "constant") {
+      if (behaviorName === "mkp") {
+        value = tables.nameToMouseButton.get(text) ?? (parseInt(text, 10) || 0);
+      } else {
+        value = parseInt(text, 10) || 0;
+      }
+    } else {
+      value = parseInt(text, 10) || 0;
+    }
+
+    if (i === 0) param1 = value;
+    else param2 = value;
+  }
+
+  return { param1, param2 };
 }

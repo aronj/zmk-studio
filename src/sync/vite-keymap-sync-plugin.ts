@@ -53,6 +53,19 @@ export function keymapSyncPlugin(options: KeymapSyncPluginOptions = {}): Plugin 
         return;
       }
 
+      // Register callback for file → client reverse sync
+      manager.setFileChangeCallback((messages) => {
+        if (!wss) return;
+        for (const msg of messages) {
+          const payload = JSON.stringify(msg);
+          for (const client of wss.clients) {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(payload);
+            }
+          }
+        }
+      });
+
       // Use noServer mode to avoid intercepting Vite's HMR WebSocket.
       // ws v8 calls abortHandshake() on non-matching paths, which kills
       // Vite's HMR connection and causes infinite full-page reloads.

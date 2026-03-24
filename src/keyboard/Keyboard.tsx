@@ -186,10 +186,41 @@ export default function Keyboard() {
   const [dragSourcePosition, setDragSourcePosition] = useState<number | null>(null);
   const [dragOverPosition, setDragOverPosition] = useState<number | null>(null);
   const behaviors = useBehaviors();
-  const keymapSync = useKeymapSync(keymap, behaviors);
-
   const conn = useContext(ConnectionContext);
   const undoRedo = useContext(UndoRedoContext);
+
+  // Handle file-originated binding changes: push to keyboard via RPC
+  const handleFileBindingChanged = useCallback(
+    async (layerIndex: number, keyPosition: number, binding: { behaviorId: number; param1: number; param2: number }) => {
+      if (!conn.conn || !keymap) return;
+      const layerId = keymap.layers[layerIndex]?.id;
+      if (layerId === undefined) return;
+
+      const resp = await call_rpc(conn.conn, {
+        keymap: { setLayerBinding: { layerId, keyPosition, binding } },
+      });
+
+      if (
+        resp.keymap?.setLayerBinding ===
+        SetLayerBindingResponse.SET_LAYER_BINDING_RESP_OK
+      ) {
+        setKeymap(
+          produce((draft: any) => {
+            draft.layers[layerIndex].bindings[keyPosition] = binding;
+          })
+        );
+        // Do NOT call keymapSync.notifyBindingChange — that would loop
+      } else {
+        console.error(
+          "[keymap-sync] Failed to push file change to keyboard",
+          resp.keymap?.setLayerBinding
+        );
+      }
+    },
+    [conn, keymap]
+  );
+
+  const keymapSync = useKeymapSync(keymap, behaviors, handleFileBindingChanged);
 
   useEffect(() => {
     setSelectedLayerIndex(0);
