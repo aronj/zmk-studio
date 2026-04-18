@@ -9,8 +9,159 @@ import { Dispatch, useCallback, useEffect, useState } from "react";
 import { ConnectModal, TransportFactory } from "./ConnectModal";
 
 import type { RpcTransport } from "@zmkfirmware/zmk-studio-ts-client/transport/index";
-import { connect as gatt_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/gatt";
-import { connect as serial_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/serial";
+import { UserCancelledError } from "@zmkfirmware/zmk-studio-ts-client/transport/errors";
+
+const BLE_SERVICE_UUID = "00000000-0196-6107-c967-c5cfb1c2482a";
+const BLE_RPC_CHRC_UUID = "00000001-0196-6107-c967-c5cfb1c2482a";
+
+async function gatt_connect(): Promise<RpcTransport> {
+  let dev = await navigator.bluetooth
+    .requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [BLE_SERVICE_UUID],
+    })
+    .catch((e) => {
+      if (e instanceof DOMException && e.name === "NotFoundError") {
+        throw new UserCancelledError("User cancelled the connection attempt", {
+          cause: e,
+        });
+      } else {
+        throw e;
+      }
+    });
+
+  if (!dev.gatt) {
+    throw new Error("No GATT service!");
+  }
+
+  let abortController = new AbortController();
+  let label = dev.name || "Unknown";
+
+  if (!dev.gatt.connected) {
+    await dev.gatt.connect();
+  }
+
+  console.log("[gatt] Getting primary service...");
+  let svc = await dev.gatt.getPrimaryService(BLE_SERVICE_UUID);
+  console.log("[gatt] Got service, getting characteristic...");
+  let char = await svc.getCharacteristic(BLE_RPC_CHRC_UUID);
+  const p = char.properties;
+  console.log("[gatt] Got characteristic, properties:", {
+    broadcast: p.broadcast, read: p.read, writeWithoutResponse: p.writeWithoutResponse,
+    write: p.write, notify: p.notify, indicate: p.indicate,
+    authenticatedSignedWrites: p.authenticatedSignedWrites,
+  });
+
+  // The ZMK Studio GATT characteristic uses INDICATE (not NOTIFY).
+  // Chrome on Windows may write the wrong CCC value (NOTIFY instead of INDICATE),
+  // so we manually write the CCC descriptor with the INDICATE bit.
+  const CCC_UUID = "00002902-0000-1000-8000-00805f9b34fb";
+  try {
+    await char.stopNotifications();
+    await char.startNotifications();
+    console.log("[gatt] startNotifications succeeded");
+  } catch (e) {
+    console.warn("[gatt] startNotifications failed:", e);
+  }
+
+  // Manually set CCC descriptor to INDICATE (0x0002) in case startNotifications set NOTIFY (0x0001)
+  try {
+    let cccDesc = await char.getDescriptor(CCC_UUID);
+    await cccDesc.writeValue(new Uint8Array([0x02, 0x00]));
+    console.log("[gatt] Manually wrote CCC descriptor with INDICATE bit");
+  } catch (e) {
+    console.warn("[gatt] Could not write CCC descriptor manually:", e);
+  }
+
+  let readable = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let vc = (ev: Event) => {
+        let buf = (ev.target as any)?.value?.buffer;
+        console.log("[gatt] Received data:", buf ? new Uint8Array(buf) : "null");
+        if (!buf) return;
+        controller.enqueue(new Uint8Array(buf));
+      };
+      char.addEventListener("characteristicvaluechanged", vc);
+      let cb = async () => {
+        console.log("[gatt] Disconnected");
+        char.removeEventListener("characteristicvaluechanged", vc);
+        dev.removeEventListener("gattserverdisconnected", cb);
+        controller.close();
+      };
+      dev.addEventListener("gattserverdisconnected", cb);
+    },
+  });
+
+  // Use writeValueWithResponse — characteristic has writeWithoutResponse: false
+  let writable = new WritableStream({
+    async write(chunk) {
+      console.log("[gatt] Sending data:", new Uint8Array(chunk));
+      try {
+        await char.writeValueWithResponse(new Uint8Array(chunk));
+        console.log("[gatt] Write succeeded");
+      } catch (e) {
+        console.error("[gatt] Write failed:", e);
+        throw e;
+      }
+    },
+  });
+
+  let sig = abortController.signal;
+  let abort_cb: () => void;
+  abort_cb = async () => {
+    sig.removeEventListener("abort", abort_cb);
+    dev.gatt?.disconnect();
+  };
+  sig.addEventListener("abort", abort_cb);
+
+  return { label, abortController, readable, writable };
+}
+async function serial_connect(): Promise<RpcTransport> {
+  let abortController = new AbortController();
+  let port = await navigator.serial.requestPort({});
+  await port.open({ baudRate: 9600 });
+  console.log("[serial] Port opened");
+
+  let info = port.getInfo();
+  let label =
+    (info.usbVendorId?.toLocaleString() || "") +
+    ":" +
+    (info.usbProductId?.toLocaleString() || "");
+
+  // Wrap readable to log incoming data
+  let rawReadable = port.readable!;
+  let readable = rawReadable.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        console.log("[serial] Received data:", new Uint8Array(chunk));
+        controller.enqueue(chunk);
+      },
+    })
+  );
+
+  // Wrap writable to log outgoing data
+  let rawWritable = port.writable!;
+  let writable = new WritableStream({
+    async write(chunk) {
+      console.log("[serial] Sending data:", new Uint8Array(chunk));
+      let writer = rawWritable.getWriter();
+      await writer.write(chunk);
+      writer.releaseLock();
+    },
+  });
+
+  let sig = abortController.signal;
+  let abort_cb: () => void;
+  abort_cb = async () => {
+    sig.removeEventListener("abort", abort_cb);
+    await rawWritable.close();
+    await rawReadable.cancel();
+    await port.close();
+  };
+  sig.addEventListener("abort", abort_cb);
+
+  return { label, abortController, readable, writable };
+}
 import {
   connect as tauri_ble_connect,
   list_devices as ble_list_devices,
@@ -38,7 +189,7 @@ declare global {
 
 const TRANSPORTS: TransportFactory[] = [
   navigator.serial && { label: "USB", connect: serial_connect },
-  ...(navigator.bluetooth && navigator.userAgent.indexOf("Linux") >= 0
+  ...(navigator.bluetooth
     ? [{ label: "BLE", connect: gatt_connect }]
     : []),
   ...(window.__TAURI_INTERNALS__
@@ -128,16 +279,21 @@ async function connect(
   setConnectedDeviceName: Dispatch<string | undefined>,
   signal: AbortSignal
 ) {
+  console.log("[connect] Creating RPC connection...");
   let conn = await create_rpc_connection(transport, { signal });
+  console.log("[connect] RPC connection created, sending getDeviceInfo...");
 
   let details = await Promise.race([
     call_rpc(conn, { core: { getDeviceInfo: true } })
-      .then((r) => r?.core?.getDeviceInfo)
+      .then((r) => {
+        console.log("[connect] getDeviceInfo response:", r);
+        return r?.core?.getDeviceInfo;
+      })
       .catch((e) => {
-        console.error("Failed first RPC call", e);
+        console.error("[connect] Failed first RPC call", e);
         return undefined;
       }),
-    valueAfter(undefined, 1000),
+    valueAfter(undefined, 5000),
   ]);
 
   if (!details) {
