@@ -3,13 +3,15 @@
 import { UsagePages } from "./keyboard-and-consumer-usage-tables.json";
 import HidOverrides from "./hid-usage-name-overrides.json";
 
-interface HidLabels {
+export interface HidLabels {
   short?: string;
   med?: string;
   long?: string;
 }
 
-const overrides: Record<string, Record<string, HidLabels>> = HidOverrides;
+type HidOverrideMap = Record<string, Record<string, HidLabels>>;
+
+const overrides: HidOverrideMap = HidOverrides;
 
 export interface UsageId {
   Id: number;
@@ -43,8 +45,10 @@ export const hid_usage_get_label = (
 
 export const hid_usage_get_labels = (
   usage_page: number,
-  usage_id: number
+  usage_id: number,
+  localeOverrides?: HidOverrideMap
 ): { short?: string; med?: string; long?: string } =>
+  localeOverrides?.[usage_page.toString()]?.[usage_id.toString()] ||
   overrides[usage_page.toString()]?.[usage_id.toString()] || {
     short: UsagePages.find((p) => p.Id === usage_page)?.UsageIds?.find(
       (u) => u.Id === usage_id

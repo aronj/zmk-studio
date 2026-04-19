@@ -2,6 +2,7 @@ import {
   hid_usage_get_labels,
   hid_usage_page_and_id_from_usage,
 } from "../hid-usages";
+import { useLocaleOverrides } from "../locale/LocaleContext";
 
 export interface HidUsageLabelProps {
   hid_usage: number;
@@ -12,12 +13,13 @@ function remove_prefix(s?: string) {
 }
 
 export const HidUsageLabel = ({ hid_usage }: HidUsageLabelProps) => {
+  const localeOverrides = useLocaleOverrides();
   let [page, id] = hid_usage_page_and_id_from_usage(hid_usage);
 
   // TODO: Do something with implicit mods!
   page &= 0xff;
 
-  let labels = hid_usage_get_labels(page, id);
+  let labels = hid_usage_get_labels(page, id, localeOverrides);
 
   return (
     <span
